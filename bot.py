@@ -7,8 +7,23 @@ import signal
 from urllib.parse import urljoin
 
 from aiohttp import web
-from pyrogram import Client, filters
+from pyrogram import Client, filters, utils as pyrogram_utils
 from pyrogram.errors import PeerIdInvalid, RPCError
+
+# Pyrogram 2.0.106 uses an outdated lower bound for channel IDs. Telegram has
+# since issued channel IDs below that bound. Keep the library version unchanged
+# but extend only the peer-type classifier so valid modern channel IDs work.
+_ORIGINAL_GET_PEER_TYPE = pyrogram_utils.get_peer_type
+
+def _get_peer_type_compat(peer_id: int) -> str:
+    try:
+        return _ORIGINAL_GET_PEER_TYPE(peer_id)
+    except ValueError:
+        if -1007852516352 <= peer_id < -1000000000000:
+            return "channel"
+        raise
+
+pyrogram_utils.get_peer_type = _get_peer_type_compat
 from pyrogram.types import Message
 
 import routes
@@ -168,4 +183,4 @@ app.router.add_get("/download/{channel_id}/{message_id}", routes.serve_file)
 
 
 if __name__ == "__main__":
-    bot.run(main())
+    asyncio.run(main())

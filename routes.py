@@ -40,8 +40,7 @@ def configure(*, client: Client, channel_id: int, max_concurrent_downloads: int 
     """Configure the HTTP layer with the already-running Telegram client."""
     global _DOWNLOAD_SEMAPHORE
     _DOWNLOAD_SEMAPHORE = asyncio.Semaphore(max(1, int(max_concurrent_downloads)))
-    app = client
-    app.FILE2LINK_CHANNEL_ID = int(channel_id)
+    client.FILE2LINK_CHANNEL_ID = int(channel_id)
 
 
 async def _get_media_message(client: Client, channel_id: int, message_id: int):
