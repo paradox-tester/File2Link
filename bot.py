@@ -1,155 +1,171 @@
-import os
-import logging
+from __future__ import annotations
+
 import asyncio
+import logging
+import os
+import signal
+from urllib.parse import urljoin
+
 from aiohttp import web
 from pyrogram import Client, filters
-from pyrogram.types import Message
 from pyrogram.errors import PeerIdInvalid, RPCError
+from pyrogram.types import Message
+
 import routes
 
-# --- Configuración desde variables de entorno ---
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BIN_CHANNEL = os.environ.get("BIN_CHANNEL")  # Puede ser ID numérico o username (sin @)
-BASE_URL = os.environ.get("BASE_URL")
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
 
-# --- Inicializar el bot ---
+def required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"Falta la variable de entorno requerida: {name}")
+    return value
+
+
+API_ID = int(required_env("API_ID"))
+API_HASH = required_env("API_HASH")
+BOT_TOKEN = required_env("BOT_TOKEN")
+BIN_CHANNEL = required_env("BIN_CHANNEL")
+BASE_URL = required_env("BASE_URL").rstrip("/")
+
+try:
+    MAX_CONCURRENT_DOWNLOADS = max(1, int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2")))
+except ValueError as exc:
+    raise RuntimeError("MAX_CONCURRENT_DOWNLOADS debe ser un número entero") from exc
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("file2link")
+
 bot = Client(
     "file-to-link-bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
 )
 
-# --- Configurar logging detallado ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+app = web.Application(client_max_size=0)
 
-# --- Función para obtener el ID del canal usando múltiples estrategias ---
-async def get_channel_id():
-    """
-    Obtiene el ID numérico del canal a partir de lo que se proporcione en BIN_CHANNEL.
-    Estrategias:
-    1. Intentar con el valor tal cual (puede ser ID o username).
-    2. Si falla por caché, recorrer los diálogos para forzar actualización.
-    3. Si es un username, obtenerlo directamente por username.
-    4. Si todo falla, lanzar excepción (que será capturada en init_bot).
-    """
+
+def build_download_url(channel_id: int, message_id: int) -> str:
+    return urljoin(BASE_URL + "/", f"download/{channel_id}/{message_id}")
+
+
+async def get_channel_id() -> int:
+    """Resolve BIN_CHANNEL once at startup and keep the numeric ID."""
+    value = BIN_CHANNEL.strip()
     try:
-        # Estrategia 1: Obtener el chat directamente con el valor proporcionado
-        chat = await bot.get_chat(BIN_CHANNEL)
-        logger.info(f"✅ Canal encontrado: {chat.title} (ID: {chat.id})")
-        return chat.id
-    except PeerIdInvalid:
-        logger.warning("⚠️ No se pudo obtener el canal por ID directo. Intentando con diálogos...")
-        # Estrategia 2: Recorrer los diálogos para actualizar la caché
-        async for dialog in bot.get_dialogs():
-            if str(dialog.chat.id) == str(BIN_CHANNEL) or dialog.chat.username == BIN_CHANNEL:
-                logger.info(f"✅ Canal encontrado en diálogos: {dialog.chat.title} (ID: {dialog.chat.id})")
-                return dialog.chat.id
-        # Estrategia 3: Si el valor parece un username (no empieza con -), intentar obtenerlo así
-        if not BIN_CHANNEL.startswith('-'):
-            try:
-                chat = await bot.get_chat(BIN_CHANNEL)
-                logger.info(f"✅ Canal encontrado por username: {chat.title} (ID: {chat.id})")
-                return chat.id
-            except Exception as e:
-                logger.error(f"Error al obtener por username: {e}")
-        # Si todo falla, lanzar excepción
-        raise ValueError("No se pudo encontrar el canal. Verifica el ID o username.")
-    except RPCError as e:
-        logger.error(f"Error de RPC al obtener el canal: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Error inesperado: {e}")
-        raise
+        chat = await bot.get_chat(int(value) if value.lstrip("-").isdigit() else value)
+        logger.info("Canal encontrado: %s (ID: %s)", getattr(chat, "title", None), chat.id)
+        return int(chat.id)
+    except (PeerIdInvalid, RPCError) as first_error:
+        logger.warning("No se pudo resolver BIN_CHANNEL directamente: %s", first_error)
 
-# --- Inicialización del bot ---
-async def init_bot():
-    """Inicializa el bot y obtiene el ID del canal. Si falla, no crashea."""
-    async with bot:
-        try:
-            channel_id = await get_channel_id()
-            # Guardar el ID en el objeto bot para usarlo después
-            bot.CHANNEL_ID = channel_id
-            logger.info(f"✅ Canal configurado correctamente con ID: {channel_id}")
-        except Exception as e:
-            logger.error(f"❌ Error crítico al configurar el canal: {e}")
-            logger.error("   El bot seguirá funcionando, pero no podrá procesar archivos.")
-            bot.CHANNEL_ID = None  # Indicar que no está configurado
+    # This fallback is mainly useful when the numeric peer is not in Pyrogram's
+    # local cache yet. It is executed only during startup, never per download.
+    async for dialog in bot.get_dialogs():
+        username = getattr(dialog.chat, "username", None)
+        if str(dialog.chat.id) == value or (username and username.lower() == value.lstrip("@").lower()):
+            logger.info("Canal encontrado en diálogos: %s (ID: %s)", dialog.chat.title, dialog.chat.id)
+            return int(dialog.chat.id)
 
-# --- Manejador de archivos ---
-@bot.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
-async def file_handler(client: Client, message: Message):
-    # Verificar si el canal está configurado
-    if not hasattr(client, 'CHANNEL_ID') or client.CHANNEL_ID is None:
-        await message.reply_text(
-            "❌ El bot no está configurado correctamente. Contacta al administrador."
-        )
+    raise RuntimeError("No se pudo encontrar BIN_CHANNEL. Verifica el ID/username y los permisos del bot.")
+
+
+@bot.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo | filters.voice | filters.animation | filters.video_note))
+async def file_handler(client: Client, message: Message) -> None:
+    channel_id = getattr(client, "CHANNEL_ID", None)
+    if channel_id is None:
+        await message.reply_text("❌ El bot no está configurado correctamente. Contacta al administrador.")
         return
 
     try:
-        # Reenviar el archivo al canal de almacenamiento
-        file_message = await message.forward(client.CHANNEL_ID)
-        file_id = file_message.id
-
-        # Generar enlace de descarga
-        download_link = f"{BASE_URL}/download/{client.CHANNEL_ID}/{file_id}"
-
-        # Responder al usuario
+        file_message = await message.forward(channel_id)
+        download_link = build_download_url(channel_id, file_message.id)
         await message.reply_text(
-            f"✅ ¡Enlace generado!\n\n"
+            "✅ ¡Enlace generado!\n\n"
             f"🔗 {download_link}\n\n"
-            f"📥 Descarga reanudable con JDownloader o cualquier gestor.\n"
-            f"⚡ El enlace es permanente mientras el archivo exista."
+            "📥 Descarga reanudable con JDownloader o cualquier gestor.\n"
+            "⚡ El enlace es permanente mientras el archivo exista."
         )
-        logger.info(f"Archivo procesado para usuario {message.from_user.id}, enlace: {download_link}")
-
+        logger.info("Archivo procesado para usuario %s: %s", getattr(message.from_user, "id", "unknown"), download_link)
     except PeerIdInvalid:
-        logger.error("Error: Peer ID inválido al procesar archivo.")
-        await message.reply_text(
-            "❌ Error: El bot no tiene acceso al canal de almacenamiento. Verifica permisos."
-        )
-    except RPCError as e:
-        logger.error(f"Error de Telegram: {e}")
+        logger.exception("Peer ID inválido al procesar archivo")
+        await message.reply_text("❌ El bot no tiene acceso al canal de almacenamiento. Verifica sus permisos.")
+    except RPCError:
+        logger.exception("Error de Telegram al procesar archivo")
         await message.reply_text("❌ Error al comunicarse con Telegram. Intenta de nuevo.")
-    except Exception as e:
-        logger.error(f"Error inesperado: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error inesperado al procesar archivo")
         await message.reply_text("❌ Ocurrió un error inesperado. Intenta de nuevo.")
 
-# --- Servidor web para servir archivos ---
-app = web.Application()
-app.router.add_get('/download/{channel_id}/{message_id}', routes.serve_file)
 
-# Endpoint de salud para Railway
-async def health_check(request):
-    return web.Response(text="OK", status=200)
+async def health_check(request: web.Request) -> web.Response:
+    bot_ready = bot.is_connected and getattr(bot, "CHANNEL_ID", None) is not None
+    return web.Response(text="OK" if bot_ready else "STARTING", status=200 if bot_ready else 503)
 
-app.router.add_get('/health', health_check)
 
-async def start_web_server():
-    """Inicia el servidor web en el puerto asignado por Railway."""
-    port = int(os.environ.get("PORT", 8000))
-    runner = web.AppRunner(app)
+async def start_web_server(channel_id: int) -> web.AppRunner:
+    app["telegram_client"] = bot
+    app["channel_id"] = int(channel_id)
+    routes.configure(
+        client=bot,
+        channel_id=channel_id,
+        max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS,
+    )
+
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", "8000"))
+    site = web.TCPSite(runner, host="0.0.0.0", port=port, backlog=128)
     await site.start()
-    logger.info(f"Servidor web iniciado en el puerto {port}")
+    logger.info("Servidor HTTP iniciado en 0.0.0.0:%s", port)
+    return runner
 
-# --- Punto de entrada ---
+
+async def main() -> None:
+    runner: web.AppRunner | None = None
+    stop_event = asyncio.Event()
+
+    def request_shutdown() -> None:
+        if not stop_event.is_set():
+            logger.info("Señal de apagado recibida; cerrando limpiamente...")
+            stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, request_shutdown)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+    try:
+        await bot.start()
+        channel_id = await get_channel_id()
+        bot.CHANNEL_ID = channel_id
+        runner = await start_web_server(channel_id)
+        logger.info("🚀 File2Link iniciado correctamente")
+
+        # bot.start() keeps Pyrogram's update dispatcher running. The HTTP
+        # server and Telegram client share this same asyncio event loop; waiting
+        # on our shutdown event avoids mixing run_until_complete()/run()/idle()
+        # on different loop lifecycles.
+        await stop_event.wait()
+    finally:
+        if runner is not None:
+            await runner.cleanup()
+        if bot.is_connected:
+            await bot.stop()
+        logger.info("File2Link detenido")
+
+
+app.router.add_get("/health", health_check)
+app.router.add_get("/download/{channel_id}/{message_id}", routes.serve_file)
+
+
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-
-    # 1. Inicializar el bot (obtener el canal)
-    loop.run_until_complete(init_bot())
-
-    # 2. Iniciar el servidor web
-    loop.create_task(start_web_server())
-
-    # 3. Iniciar el bot (long polling)
-    logger.info("🚀 Bot iniciado correctamente")
-    bot.run()
+    bot.run(main())
