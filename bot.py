@@ -178,9 +178,10 @@ async def main() -> None:
 
     try:
         await bot.start()
-        # Forzar eliminación de cualquier webhook previo
-        await bot.set_webhook()
-        logger.info("Webhook eliminado (modo polling)")
+        # Eliminamos la línea problemática: await bot.set_webhook()
+        # Si quieres eliminar webhooks existentes, usa:
+        # await bot.delete_webhook()  # Este método sí existe en Pyrogram 2.0+
+        # Pero no es necesario porque el bot usa polling por defecto.
 
         channel_id = await get_channel_id()
         bot.CHANNEL_ID = channel_id
@@ -188,6 +189,8 @@ async def main() -> None:
         logger.info("🚀 File2Link iniciado correctamente")
 
         await stop_event.wait()
+    except Exception as e:
+        logger.exception("Error en main: %s", e)
     finally:
         if runner is not None:
             await runner.cleanup()
