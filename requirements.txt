@@ -1,0 +1,3 @@
+Pyrogram==2.0.106
+aiohttp==3.14.3
+tgcrypto==1.2.5
