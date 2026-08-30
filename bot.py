@@ -12,12 +12,16 @@ from pyrogram import Client, filters, utils as pyrogram_utils
 from pyrogram.errors import PeerIdInvalid, RPCError
 from pyrogram.types import Message
 
-# Pyrogram 2.0.106 has an obsolete lower bound for modern -100... channel IDs.
-# Update the constants used by Pyrogram itself instead of wrapping get_peer_type:
-# this keeps every internal resolver (get_chat, resolve_peer, get_messages,
-# forward, etc.) using the same channel-ID rules.
-pyrogram_utils.MIN_CHANNEL_ID = -1007852516352
-pyrogram_utils.MIN_CHAT_ID = -999999999999
+# Parche de compatibilidad para IDs de canal modernos
+_ORIGINAL_GET_PEER_TYPE = pyrogram_utils.get_peer_type
+def _get_peer_type_compat(peer_id: int) -> str:
+    try:
+        return _ORIGINAL_GET_PEER_TYPE(peer_id)
+    except ValueError:
+        if -1007852516352 <= peer_id < -1000000000000:
+            return "channel"
+        raise
+pyrogram_utils.get_peer_type = _get_peer_type_compat
 
 import routes
 
@@ -89,12 +93,10 @@ async def file_handler(client: Client, message: Message) -> None:
         await message.reply("❌ Tipo de archivo no soportado.")
         return
 
-    channel_id = getattr(client, "CHANNEL_ID", None)
-    if channel_id is None:
-        await message.reply_text("❌ El bot no está configurado correctamente. Contacta al administrador.")
-        return
-
     try:
+        # Resolve the storage channel only when a file actually needs it.
+        # A failure here must never stop the Telegram dispatcher.
+        channel_id = await get_channel_id()
         file_message = await message.forward(channel_id)
         download_link = build_download_url(channel_id, file_message.id)
         await message.reply_text(
@@ -121,34 +123,57 @@ async def file_handler(client: Client, message: Message) -> None:
 def build_download_url(channel_id: int, message_id: int) -> str:
     return urljoin(BASE_URL + "/", f"download/{channel_id}/{message_id}")
 
+_channel_lock = asyncio.Lock()
+_channel_id_cache: int | None = None
+
 async def get_channel_id() -> int:
-    value = BIN_CHANNEL.strip()
-    target = int(value) if value.lstrip("-").isdigit() else value
+    """Resolve the storage channel lazily and cache the real Telegram ID.
 
-    # IMPORTANT: get_dialogs() is a user-only Telegram method. Calling it with
-    # a bot token raises BOT_METHOD_INVALID and was the direct cause of the
-    # restart loop seen in Railway. Resolve the configured channel directly.
-    try:
-        chat = await bot.get_chat(target)
-    except PeerIdInvalid as exc:
-        raise RuntimeError(
-            f"No se pudo resolver BIN_CHANNEL={value!r}. "
-            "Si es un ID -100..., verifica que el bot sea miembro/admin del canal. "
-            "Pyrogram no pudo obtener el access_hash del canal."
-        ) from exc
-    except RPCError as exc:
-        raise RuntimeError(
-            f"Telegram rechazó la resolución de BIN_CHANNEL={value!r}: {exc}"
-        ) from exc
+    IMPORTANT: never use get_dialogs() here; Telegram exposes messages.getDialogs
+    as a user-only method and bots receive BOT_METHOD_INVALID.
+    """
+    global _channel_id_cache
 
-    channel_id = int(chat.id)
-    if value.lstrip("-").isdigit() and channel_id != int(value):
-        logger.warning("BIN_CHANNEL %s resolvió al ID %s", value, channel_id)
-    logger.info("Canal de almacenamiento resuelto: %s (ID: %s)", getattr(chat, "title", None), channel_id)
-    return channel_id
+    if _channel_id_cache is not None:
+        return _channel_id_cache
+
+    async with _channel_lock:
+        if _channel_id_cache is not None:
+            return _channel_id_cache
+
+        value = BIN_CHANNEL.strip()
+        target = int(value) if value.lstrip("-").isdigit() else value
+
+        try:
+            chat = await bot.get_chat(target)
+        except PeerIdInvalid as exc:
+            raise RuntimeError(
+                f"No se pudo resolver BIN_CHANNEL={value!r}. "
+                "El bot debe ser miembro del canal y el ID debe ser correcto. "
+                "No se utilizará get_dialogs() porque ese método no funciona con bots."
+            ) from exc
+        except RPCError as exc:
+            raise RuntimeError(
+                f"Telegram rechazó la resolución de BIN_CHANNEL={value!r}: {exc}"
+            ) from exc
+
+        resolved = int(chat.id)
+        if value.lstrip("-").isdigit() and resolved != int(value):
+            raise RuntimeError(
+                f"BIN_CHANNEL={value!r} resolvió al ID inesperado {resolved}."
+            )
+
+        _channel_id_cache = resolved
+        logger.info(
+            "Canal de almacenamiento resuelto: %s (ID: %s)",
+            getattr(chat, "title", None),
+            resolved,
+        )
+        bot.CHANNEL_ID = resolved
+        return resolved
 
 async def health_check(request: web.Request) -> web.Response:
-    bot_ready = bot.is_connected and getattr(bot, "CHANNEL_ID", None) is not None
+    bot_ready = bool(bot.is_connected)
     return web.Response(text="OK" if bot_ready else "STARTING", status=200 if bot_ready else 503)
 
 async def start_web_server(channel_id: int) -> web.AppRunner:
@@ -190,15 +215,17 @@ async def main() -> None:
         # await bot.delete_webhook()  # Este método sí existe en Pyrogram 2.0+
         # Pero no es necesario porque el bot usa polling por defecto.
 
-        channel_id = await get_channel_id()
-        bot.CHANNEL_ID = channel_id
-        runner = await start_web_server(channel_id)
+        # Do NOT resolve BIN_CHANNEL during startup. The bot must remain
+        # responsive even if the storage channel cannot temporarily be resolved.
+        # It will be resolved lazily when the first file arrives.
+        configured_channel = int(BIN_CHANNEL) if BIN_CHANNEL.strip().lstrip("-").isdigit() else BIN_CHANNEL.strip()
+        runner = await start_web_server(configured_channel)
+        logger.info("Handlers activos; BIN_CHANNEL=%s se resolverá bajo demanda", BIN_CHANNEL)
         logger.info("🚀 File2Link iniciado correctamente")
 
         await stop_event.wait()
     except Exception as e:
-        logger.exception("Error fatal en main: %s", e)
-        raise
+        logger.exception("Error en main: %s", e)
     finally:
         if runner is not None:
             await runner.cleanup()
