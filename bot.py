@@ -39,6 +39,54 @@ WORKER_SESSION_NAME = os.getenv("WORKER_SESSION_NAME", "file2link-worker").strip
 WORKER_SESSION_WORKDIR = os.getenv("WORKER_SESSION_WORKDIR", "/data").strip() or "/data"
 REQUIRED_CHATS = [x.strip() for x in os.getenv("REQUIRED_CHATS", "").split(",") if x.strip()]
 
+
+def ensure_session_workdir() -> str:
+    """Return a writable directory for Pyrogram's SQLite session file.
+
+    Railway volumes are normally mounted at /data, but a deployment without
+    the volume (or with an unavailable mount) must not crash with
+    'sqlite3.OperationalError: unable to open database file'.
+    """
+    candidates = []
+    configured = WORKER_SESSION_WORKDIR
+    if configured:
+        candidates.append(configured)
+
+    # Keep a safe writable fallback for deployments where /data is not
+    # mounted. A persisted Railway volume at /data remains the preferred path.
+    candidates.extend([
+        os.path.join(os.getcwd(), ".file2link-data"),
+        "/tmp/file2link-data",
+    ])
+
+    last_error = None
+    for directory in candidates:
+        try:
+            os.makedirs(directory, exist_ok=True)
+            probe = os.path.join(directory, ".write-test")
+            with open(probe, "a", encoding="utf-8"):
+                pass
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+            if directory != configured:
+                logger.warning(
+                    "WORKER_SESSION_WORKDIR='%s' no está disponible; usando '%s'. "
+                    "Para conservar la sesión entre reinicios, configura un "
+                    "Railway Volume en /data o un WORKER_SESSION_WORKDIR persistente.",
+                    configured,
+                    directory,
+                )
+            return directory
+        except OSError as exc:
+            last_error = exc
+
+    raise RuntimeError(
+        "No se pudo crear un directorio escribible para la sesión de Pyrogram. "
+        f"Configurado: '{configured}'. Último error: {last_error}"
+    )
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -162,6 +210,9 @@ async def health_check(request: web.Request) -> web.Response:
 async def main() -> None:
     if WORKER_ONLY:
         # Worker mode deliberately uses the SAME bot identity as the main bot.
+        session_workdir = ensure_session_workdir()
+        session_name = WORKER_SESSION_NAME
+        session_path = os.path.join(session_workdir, f"{session_name}.session")
         # A worker must not have a dedicated bot token and must never start a
         # user-account login flow (phone/code/2FA). Each worker creates/uses
         # its own MTProto session from the shared BOT_TOKEN, or loads a
@@ -176,14 +227,13 @@ async def main() -> None:
                 no_updates=True,
             )
         else:
-            session_path = os.path.join(WORKER_SESSION_WORKDIR, f"{WORKER_SESSION_NAME}.session")
             bot_token = os.getenv("BOT_TOKEN", "").strip()
             if os.path.isfile(session_path):
                 bot = Client(
                     WORKER_SESSION_NAME,
                     api_id=API_ID,
                     api_hash=API_HASH,
-                    workdir=WORKER_SESSION_WORKDIR,
+                    workdir=session_workdir,
                     no_updates=True,
                 )
             elif bot_token:
@@ -195,7 +245,7 @@ async def main() -> None:
                     api_id=API_ID,
                     api_hash=API_HASH,
                     bot_token=bot_token,
-                    workdir=WORKER_SESSION_WORKDIR,
+                    workdir=session_workdir,
                     no_updates=True,
                 )
             else:
