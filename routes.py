@@ -92,7 +92,14 @@ def configure(
     _channel_id = int(channel_id)
     _link_secret = bytes(link_secret)
     _fernet = Fernet(_fernet_key(link_secret))
-    _link_ttl_seconds = max(0, int(os.getenv("LINK_TTL_SECONDS", "0")))
+    link_ttl_days = os.getenv("LINK_TTL_DAYS")
+    if link_ttl_days is not None:
+        try:
+            _link_ttl_seconds = max(0, int(float(link_ttl_days) * 86400))
+        except ValueError as exc:
+            raise RuntimeError("LINK_TTL_DAYS debe ser un número >= 0") from exc
+    else:
+        _link_ttl_seconds = max(0, int(os.getenv("LINK_TTL_SECONDS", "0")))
     _traffic_limit_bytes = max(1, int(traffic_limit_bytes))
     _reset_day = min(28, max(1, int(os.getenv("TRAFFIC_RESET_DAY", "1"))))
     _traffic_db_path = traffic_db_path

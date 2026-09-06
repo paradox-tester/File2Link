@@ -37,26 +37,38 @@ For the strongest protection:
 
 ## Worker setup
 
+Workers no longer require a dedicated Telegram Bot API token. A worker authenticates to Telegram as a normal Telegram user through MTProto. This keeps the existing direct `worker -> client` HTTP streaming path unchanged.
+
 Required variables:
 
 - `API_ID`
 - `API_HASH`
-- `BOT_TOKEN`
 - `BIN_CHANNEL`
 - `BASE_URL`
 - `LINK_SECRET`
 - `CONTROL_TOKEN`
-
-Recommended:
-
 - `WORKER_ONLY=1`
-- `TRAFFIC_LIMIT_GB=95`
-- `TRAFFIC_DB_PATH=/data/traffic.db`
-- `MAX_CONCURRENT_DOWNLOADS=2`
-- `LINK_TTL_SECONDS=0`
-- `REQUIRED_CHATS=`
 
-The worker bot must have access to its storage channel, normally as administrator.
+For the Telegram user session, use **one** of these two methods:
+
+1. `WORKER_SESSION_STRING` — recommended for Railway/ephemeral deployments.
+2. A persistent Pyrogram session file using `WORKER_SESSION_NAME` and `WORKER_SESSION_WORKDIR=/data` on a Railway Volume.
+
+### Generate a worker session
+
+`API_ID` and `API_HASH` identify the Telegram application; they do not by themselves authorize a Telegram account. Telegram requires a user authorization flow with a phone number and verification code, and may require the account's 2FA password. citeturn0search0turn0search1
+
+Run the included setup utility from a terminal:
+
+```bash
+python worker_auth.py
+```
+
+Optionally set `WORKER_PHONE_NUMBER=+1234567890` before running it. Pyrogram will request the Telegram login code and, when applicable, the 2FA password. After successful authorization it exports a session string with `export_session_string()`. citeturn1search0turn1search4
+
+Put that generated value in the worker environment as `WORKER_SESSION_STRING`. Treat the session string as a secret: it represents an authorized Telegram session. Pyrogram documents session strings specifically for persisting authorized clients without depending on a session file. citeturn1search1
+
+The Telegram user account used by the worker must have access to its storage channel.
 
 ## Orchestrator setup
 
@@ -69,7 +81,7 @@ Required variables:
 - `ADMIN_IDS`
 - `REQUIRED_CHATS` (if membership is required)
 
-The orchestrator bot must have access to every worker storage channel because it copies incoming messages directly into the selected channel with Telegram's copy operation.
+The orchestrator bot must have access to every worker storage channel because it copies incoming messages directly into the selected channel with Telegram's copy operation. The worker's Telegram user account must also have access to its own storage channel because that same user session is used to read and stream the media.
 
 ## Domains
 
@@ -94,6 +106,42 @@ Admin:
 
 - `/traffic` — monthly controlled egress for every configured worker
 - `/workers` — health, state, active downloads and traffic
+
+
+## Telegram anti-flood protection
+
+The orchestrator now spaces user-facing outbound messages instead of calling Telegram repeatedly with no pacing.
+
+Variables:
+
+- `MESSAGE_MIN_INTERVAL_SECONDS=1.5` — minimum spacing between replies in the same private chat.
+- `GLOBAL_MESSAGE_MIN_INTERVAL_SECONDS=0.10` — small global spacing between outbound bot messages.
+- Telegram `FloodWait` responses are handled by sleeping for the requested period and retrying.
+
+These are application-level safeguards; Telegram's own flood limits remain authoritative.
+
+## ShrinkMe monetization
+
+The orchestrator can automatically pass every generated File2Link URL through ShrinkMe before sending it to the user.
+
+Variables:
+
+- `SHRINKME_ENABLED=1`
+- `SHRINKME_API_KEY=<your token>`
+- `SHRINKME_TIMEOUT_SECONDS=10`
+- `SHRINKME_API_URL=https://shrinkme.io/api`
+
+The API token is read only from the environment and is never embedded in the source code. If ShrinkMe is temporarily unavailable or returns an invalid response, the bot falls back to the original File2Link URL so a shortener outage does not take the bot offline.
+
+Important: ShrinkMe's terms require the visitor to click the shortened URL themselves and prohibit fake/automated traffic, manipulation of views, automatic redirects and incentivized clicks. The bot therefore only **creates and presents** the shortened link; it does not open, click, iframe, redirect through, or artificially generate traffic for the ShrinkMe URL.
+
+The public ShrinkMe service describes its model as earning from visits to shortened URLs and exposes an API for programmatic shortening. See the official site and terms before production use.
+
+## Link expiration
+
+The default link lifetime is 7 days and is controlled by `LINK_TTL_DAYS` in the worker and orchestrator `.env` files. Set `LINK_TTL_DAYS=0` to disable expiration. The timestamp is embedded in the authenticated File2Link token, so the real File2Link URL becomes unavailable after the configured lifetime. ShrinkMe receives that same expiring File2Link URL as its destination; therefore, after expiration, a previously generated ShrinkMe URL can no longer reach the file. ShrinkMe does not provide a verified API parameter here for independently expiring the hosted short URL itself, so expiration is enforced at the protected destination rather than by relying on an undocumented ShrinkMe feature.
+
+`LINK_TTL_SECONDS` remains supported as a backward-compatible fallback when `LINK_TTL_DAYS` is absent.
 
 ## Link invalidation
 
