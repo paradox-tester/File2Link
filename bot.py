@@ -11,7 +11,7 @@ from aiohttp import web
 from pyrogram import Client, enums, filters, raw, utils
 from pyrogram.errors import PeerIdInvalid, RPCError
 from pyrogram.handlers import MessageHandler
-from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 import routes
 
@@ -143,7 +143,7 @@ async def file_handler(client: Client, message: Message) -> None:
         link = build_download_url(channel_id, file_message.id)
         await message.reply_text(
             f"✅ ¡Enlace generado!\n\n🔗 {link}\n\n📥 Compatible con gestores de descarga y reanudación.",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
         )
     except (PeerIdInvalid, RPCError):
         logger.exception("Telegram error while storing file")
