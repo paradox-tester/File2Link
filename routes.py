@@ -282,6 +282,21 @@ async def control_set_disabled(request: web.Request) -> web.Response:
     return web.json_response({"disabled": disabled})
 
 
+
+async def control_clear(request: web.Request) -> web.Response:
+    """Reset worker traffic counters and reactivate it."""
+    await _auth_control(request)
+    global _active_downloads, _reserved_bytes
+    assert _traffic_lock is not None and _traffic_db is not None
+    async with _traffic_lock:
+        _traffic_db.execute("DELETE FROM traffic_month")
+        _traffic_db.commit()
+        _active_downloads = 0
+        _reserved_bytes = 0
+    os.environ["WORKER_DISABLED"] = "0"
+    return web.json_response({"cleared": True, "disabled": False, "egress_bytes": 0})
+
+
 async def control_sync_usage(request: web.Request) -> web.Response:
     """Authoritative monthly usage sync from the CGNAT orchestrator.
 
