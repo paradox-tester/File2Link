@@ -95,15 +95,6 @@ logging.basicConfig(
 logger = logging.getLogger("file2link")
 
 
-def no_preview_options():
-    """Compatibility helper for Telegram preview disabling."""
-    try:
-        from telegram import LinkPreviewOptions  # type: ignore
-        return {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
-    except Exception:
-        return {"disable_web_page_preview": True}
-
-
 def build_download_url(channel_id: int, message_id: int) -> str:
     token = routes.create_file_token(channel_id, message_id, LINK_SECRET)
     return urljoin(BASE_URL + "/", f"download/{token}")
@@ -200,7 +191,7 @@ async def file_handler(client: Client, message: Message) -> None:
         link = build_download_url(channel_id, file_message.id)
         await message.reply_text(
             f"✅ ¡Enlace generado!\n\n🔗 {link}\n\n📥 Compatible con gestores de descarga y reanudación.",
-            **no_preview_options(),
+            disable_web_page_preview=True,
         )
     except (PeerIdInvalid, RPCError):
         logger.exception("Telegram error while storing file")

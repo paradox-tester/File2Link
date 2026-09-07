@@ -387,17 +387,6 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
             text="Esta instancia alcanzó su límite de tráfico mensual."
         )
 
-    logger.warning(
-        "DOWNLOAD_REQUEST token=%s size=%s range=%s-%s ip=%s ua=%s referer=%s",
-        token[:12],
-        content_length,
-        start,
-        end,
-        request.remote,
-        request.headers.get("User-Agent", ""),
-        request.headers.get("Referer", ""),
-    )
-
     response = web.StreamResponse(status=status, headers=headers)
     await response.prepare(request)
     reserved = content_length
