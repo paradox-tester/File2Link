@@ -221,11 +221,10 @@ def _parse_range(value: Optional[str], size: int) -> tuple[int, int, int]:
     return start, end, 206
 
 
-def _content_disposition(filename: str, *, inline: bool = False) -> str:
+def _content_disposition(filename: str) -> str:
     fallback = filename.encode("ascii", "ignore").decode("ascii") or "archivo.bin"
     fallback = fallback.replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
-    disposition = "inline" if inline else "attachment"
-    return f'{disposition}; filename="{fallback}"; filename*=UTF-8\'\'{quote(filename, safe="!#$&+-.^_`|~")}'
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{quote(filename, safe="!#$&+-.^_`|~")}'
 
 
 async def _auth_control(request: web.Request) -> None:
@@ -237,16 +236,6 @@ async def _auth_control(request: web.Request) -> None:
 
 def hmac_compare(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
-
-
-async def serve_file(request: web.Request) -> web.StreamResponse:
-    """Original download endpoint; preserves attachment behavior."""
-    return await _serve_file(request, inline=False)
-
-
-async def serve_stream(request: web.Request) -> web.StreamResponse:
-    """Browser-friendly video endpoint using the same token and stream rules."""
-    return await _serve_file(request, inline=True)
 
 
 async def traffic_status(request: web.Request) -> web.Response:
@@ -360,7 +349,7 @@ async def _record_range_and_invalidate(client: Client, token_key: str, channel_i
             logger.exception("Could not delete storage message %s/%s after completion", channel_id, message_id)
 
 
-async def _serve_file(request: web.Request, *, inline: bool = False) -> web.StreamResponse:
+async def serve_file(request: web.Request) -> web.StreamResponse:
     global _active_downloads
     if os.getenv("WORKER_DISABLED", "0") == "1":
         raise web.HTTPServiceUnavailable(text="Esta instancia no está disponible temporalmente.")
@@ -393,7 +382,7 @@ async def _serve_file(request: web.Request, *, inline: bool = False) -> web.Stre
     content_length = max(0, end - start + 1)
     headers = {
         "Content-Type": mime_type,
-        "Content-Disposition": _content_disposition(file_name, inline=inline),
+        "Content-Disposition": _content_disposition(file_name),
         "Content-Length": str(content_length),
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-store, max-age=0",
