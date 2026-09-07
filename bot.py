@@ -285,6 +285,7 @@ async def main() -> None:
     app.router.add_get("/health", health_check)
     app.router.add_get("/download/{token}", routes.serve_file)
     app.router.add_get("/traffic", routes.traffic_status)
+    app.router.add_get("/control/activity", routes.control_activity)
     app.router.add_get("/control/status", routes.control_status)
     app.router.add_post("/control/disable", routes.control_set_disabled)
     app.router.add_post("/control/sync-usage", routes.control_sync_usage)
