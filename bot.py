@@ -284,6 +284,7 @@ async def main() -> None:
     app = web.Application(client_max_size=0)
     app.router.add_get("/health", health_check)
     app.router.add_get("/download/{token}", routes.serve_file)
+    app.router.add_get("/stream/{token}", routes.serve_stream)
     app.router.add_get("/traffic", routes.traffic_status)
     app.router.add_get("/control/status", routes.control_status)
     app.router.add_post("/control/disable", routes.control_set_disabled)
