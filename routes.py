@@ -40,7 +40,6 @@ _traffic_db: sqlite3.Connection | None = None
 _reset_day = 1
 _active_downloads = 0
 _reserved_bytes = 0
-_active_connections: dict[str, dict] = {}
 _boot_id = uuid.uuid4().hex
 _COMPLETED_LINKS: set[str] = set()
 _DOWNLOAD_RANGES: dict[str, list[tuple[int, int]]] = {}
@@ -239,16 +238,6 @@ def hmac_compare(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
 
 
-async def control_activity(request: web.Request) -> web.Response:
-    await _auth_control(request)
-    return web.json_response({
-        "boot_id": _boot_id,
-        "active_downloads": _active_downloads,
-        "connections": list(_active_connections.values()),
-        "traffic_gb": traffic_bytes() / 1_000_000_000,
-    })
-
-
 async def traffic_status(request: web.Request) -> web.Response:
     await _auth_control(request)
     used = traffic_bytes()
@@ -398,9 +387,6 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
             text="Esta instancia alcanzó su límite de tráfico mensual."
         )
 
-    conn_id = uuid.uuid4().hex[:12]
-    _active_connections[conn_id] = {"id": conn_id, "token": token[:12], "size": content_length, "range": f"{start}-{end}", "ip": request.remote, "user_agent": request.headers.get("User-Agent", ""), "started": int(time.time()), "sent": 0}
-
     logger.warning(
         "DOWNLOAD_REQUEST token=%s size=%s range=%s-%s ip=%s ua=%s referer=%s",
         token[:12],
@@ -434,7 +420,6 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
                     await response.write(chunk)
                     await _add_traffic(len(chunk))
                     sent += len(chunk)
-                    _active_connections.get(conn_id, {})["sent"] = sent
                 if sent >= content_length:
                     break
 
@@ -462,5 +447,4 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
         return response
     finally:
         _active_downloads = max(0, _active_downloads - 1)
-        _active_connections.pop(conn_id, None)
         await _release_reservation(reserved)
