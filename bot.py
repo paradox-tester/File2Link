@@ -10,8 +10,8 @@ from urllib.parse import urljoin
 from aiohttp import web
 from pyrogram import Client, enums, filters, raw, utils
 from pyrogram.errors import PeerIdInvalid, RPCError
-from pyrogram.handlers import MessageHandler
-from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 import routes
 
@@ -37,7 +37,7 @@ WORKER_ONLY = os.getenv("WORKER_ONLY", "0").strip() == "1"
 WORKER_SESSION_STRING = os.getenv("WORKER_SESSION_STRING", "").strip()
 WORKER_SESSION_NAME = os.getenv("WORKER_SESSION_NAME", "file2link-worker").strip() or "file2link-worker"
 WORKER_SESSION_WORKDIR = os.getenv("WORKER_SESSION_WORKDIR", "/data").strip() or "/data"
-REQUIRED_CHATS = [x.strip() for x in os.getenv("REQUIRED_CHATS", "").split(",") if x.strip()]
+REQUIRED_CHATS = [x.strip().strip('"').strip("'") for x in os.getenv("REQUIRED_CHATS", "").split(",") if x.strip()]
 
 
 def ensure_session_workdir() -> str:
@@ -145,6 +145,8 @@ async def build_required_chats_keyboard(client: Client) -> InlineKeyboardMarkup 
             rows.append([InlineKeyboardButton(chat.title or str(ref), url=url)])
         except Exception:
             logger.exception("No se pudo cargar chat requerido %s", ref)
+    if rows:
+        rows.append([InlineKeyboardButton("✅ Verificar membresía", callback_data="verify_membership")])
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -178,6 +180,39 @@ async def check_required_membership(client: Client, message: Message) -> bool:
             )
             return False
     return True
+
+
+async def verify_membership_callback(client: Client, query: CallbackQuery) -> None:
+    if not query.from_user:
+        return
+    # Create a temporary message-like object is unnecessary; perform the checks directly.
+    missing = []
+    for ref in REQUIRED_CHATS:
+        try:
+            chat = await client.get_chat(ref)
+            member = await client.get_chat_member(chat.id, query.from_user.id)
+            allowed = member.status in {
+                enums.ChatMemberStatus.MEMBER,
+                enums.ChatMemberStatus.ADMINISTRATOR,
+                enums.ChatMemberStatus.OWNER,
+            }
+            if member.status == enums.ChatMemberStatus.RESTRICTED:
+                allowed = bool(member.is_member)
+            if not allowed:
+                missing.append(ref)
+        except Exception:
+            logger.exception("No se pudo verificar %s", ref)
+            missing.append(ref)
+
+    if missing:
+        await query.answer("❌ Aún faltan canales o grupos obligatorios.", show_alert=True)
+        return
+
+    await query.answer("✅ Membresía confirmada.", show_alert=True)
+    try:
+        await query.message.edit_text("✅ Verificación completada. Ya puedes usar el bot.")
+    except Exception:
+        pass
 
 
 async def start_cmd(client: Client, message: Message) -> None:
@@ -278,6 +313,7 @@ async def main() -> None:
         )
         worker_only = False
     if not worker_only:
+        bot.add_handler(CallbackQueryHandler(verify_membership_callback, filters.regex("^verify_membership$")), group=0)
         bot.add_handler(MessageHandler(start_cmd, filters.private & filters.command("start")), group=0)
         bot.add_handler(MessageHandler(file_handler, filters.private & filters.media), group=0)
 
